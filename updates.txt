@@ -1,0 +1,36 @@
+dotnet --list-sdks
+dotnet --list-runtimes
+
+# Descargar el script oficial de instalación de .NET
+$script = "$env:TEMP\dotnet-install.ps1"
+Invoke-WebRequest https://dot.net/v1/dotnet-install.ps1 -OutFile $script -UseBasicParsing
+
+# Instalar los últimos parches de .NET 8 (LTS)
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 8.0 -Quality GA -Runtime dotnet
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 8.0 -Quality GA -Runtime aspnetcore
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 8.0 -Quality GA -Runtime windowsdesktop
+
+# Instalar los últimos parches de .NET 9
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 9.0 -Quality GA -Runtime dotnet
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 9.0 -Quality GA -Runtime aspnetcore
+& powershell -NoProfile -ExecutionPolicy Bypass -File $script -Channel 9.0 -Quality GA -Runtime windowsdesktop
+
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -format json |
+  ConvertFrom-Json |
+  ForEach-Object { if ($_ | Get-Member -Name instances -ErrorAction SilentlyContinue) { $_.instances } else { $_ } } |
+  Select-Object @{n='DisplayVersion';e={$_.catalog.productDisplayVersion}}, installationVersion, updateAvailable |
+  Format-Table -Auto
+
+$vswhere   = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
+$installer = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vs_installer.exe"
+if (-not (Test-Path $installer)) { Start-Process "https://aka.ms/vs/17/release/vs_installer.exe" -Wait }
+
+$installPath = (& "$vswhere" -products * -latest -property installationPath)
+Start-Process -FilePath $installer -ArgumentList "update --installPath `"$installPath`" --passive --norestart" -Wait
+
+
+& "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe" -products * -latest -format json |
+  ConvertFrom-Json |
+  ForEach-Object { if ($_ | Get-Member -Name instances -ErrorAction SilentlyContinue) { $_.instances } else { $_ } } |
+  Select-Object @{n='DisplayVersion';e={$_.catalog.productDisplayVersion}}, installationVersion, updateAvailable |
+  Format-Table -Auto
