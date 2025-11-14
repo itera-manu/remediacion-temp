@@ -1,4 +1,6 @@
 Invoke-WebRequest -Uri "https://github.com/itera-manu/remediacion-temp/archive/refs/heads/main.zip" -OutFile "C:\tempvs\update.zip"
+Invoke-WebRequest -Uri "https://github.com/dotnet/cli-lab/releases/download/1.7.656206/dotnet-core-uninstall.msi" -OutFile "C:\tempvs\dotnet-uninstall.msi"
+
 
 dotnet-core-uninstall list
 dotnet-core-uninstall remove --runtime --version 8.0.19
@@ -47,4 +49,5 @@ Start-Process -FilePath $installer -ArgumentList "update --installPath `"$instal
   ForEach-Object { if ($_ | Get-Member -Name instances -ErrorAction SilentlyContinue) { $_.instances } else { $_ } } |
   Select-Object @{n='DisplayVersion';e={$_.catalog.productDisplayVersion}}, installationVersion, updateAvailable |
   Format-Table -Auto
+
 
