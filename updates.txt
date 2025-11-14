@@ -1,3 +1,16 @@
+Invoke-WebRequest -Uri "https://github.com/itera-manu/remediacion-temp/archive/refs/heads/main.zip" -OutFile "C:\tempvs\update.zip"
+
+dotnet-core-uninstall list
+dotnet-core-uninstall remove --runtime --version 8.0.19
+dotnet-core-uninstall remove --runtime --version 9.0.8
+dotnet-core-uninstall remove --aspnet-runtime --version 8.0.19
+dotnet-core-uninstall remove --aspnet-runtime --version 9.0.8
+
+winget upgrade --id Microsoft.DotNet.Runtime.8
+winget upgrade --id Microsoft.DotNet.AspNetCoreRuntime.8
+winget upgrade --id Microsoft.DotNet.Runtime.9
+winget upgrade --id Microsoft.DotNet.AspNetCoreRuntime.9
+
 dotnet --list-sdks
 dotnet --list-runtimes
 
@@ -34,3 +47,4 @@ Start-Process -FilePath $installer -ArgumentList "update --installPath `"$instal
   ForEach-Object { if ($_ | Get-Member -Name instances -ErrorAction SilentlyContinue) { $_.instances } else { $_ } } |
   Select-Object @{n='DisplayVersion';e={$_.catalog.productDisplayVersion}}, installationVersion, updateAvailable |
   Format-Table -Auto
+
