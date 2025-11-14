@@ -1,0 +1,238 @@
+<# 
+.SYNOPSIS
+  Remediación de seguridad .NET/ASP.NET Core (Oct 2025)
+  - Actualiza a: .NET 8.0.20 y 9.0.9 / ASP.NET Core 8.0.20 y 9.0.9
+  - Opción para quitar 8.0.19 y 9.0.8 si sobran.
+
+.PARAMETER RemoveOld
+  Si se especifica, intenta desinstalar 8.0.19 / 9.0.8 (y ASP.NET equivalentes) con la .NET Uninstall Tool si está disponible.
+
+.PARAMETER SkipIISReset
+  Si se especifica, no reinicia IIS al final.
+
+.PARAMETER DryRun
+  Muestra lo que haría sin ejecutar cambios.
+#>
+
+[CmdletBinding()]
+param(
+  [switch]$RemoveOld,
+  [switch]$SkipIISReset,
+  [switch]$DryRun
+)
+
+# === Configuración objetivo ===
+$TargetNetCore = @("8.0.20","9.0.9")
+$TargetAspNet  = @("8.0.20","9.0.9")
+
+# Versiones previas vulnerables que queremos retirar si $RemoveOld
+$OldNetCore = @("8.0.19","9.0.8")
+$OldAspNet  = @("8.0.19","9.0.8")
+
+function Assert-Admin {
+  $isAdmin = ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+  if (-not $isAdmin) {
+    throw "Ejecuta esta consola de PowerShell como Administrador."
+  }
+}
+
+function Write-Header($text) {
+  Write-Host ("`n=== {0} ===" -f $text) -ForegroundColor Cyan
+}
+
+function Test-Command($name){
+  $null -ne (Get-Command $name -ErrorAction SilentlyContinue)
+}
+
+function Get-InstalledRuntimes {
+  if (-not (Test-Command "dotnet")) {
+    return @()
+  }
+  $runtimes = & dotnet --list-runtimes 2>$null
+  $result = @()
+  foreach($line in $runtimes){
+    # Ejemplos:
+    # Microsoft.NETCore.App 8.0.20 [C:\Program Files\dotnet\shared\Microsoft.NETCore.App]
+    # Microsoft.AspNetCore.App 9.0.9 [C:\Program Files\dotnet\shared\Microsoft.AspNetCore.App]
+    if ($line -match "^(?<name>Microsoft\.(?<flavor>NETCore|AspNetCore)\.App)\s+(?<ver>\d+\.\d+\.\d+)\s+\[(?<path>.+?)\]$") {
+      $result += [pscustomobject]@{
+        Name   = $Matches['name']
+        Flavor = if ($Matches['flavor'] -eq 'NETCore') {'NETCore'} else {'AspNetCore'}
+        Version= $Matches['ver']
+        Path   = $Matches['path']
+      }
+    }
+  }
+  return $result
+}
+
+function Ensure-Winget {
+  if (-not (Test-Command "winget")) {
+    throw "No se encontró 'winget'. Instálalo/actualízalo desde Microsoft Store (App Installer) o usa instaladores offline."
+  }
+}
+
+function Install-Or-Upgrade-WithWinget {
+  param(
+    [Parameter(Mandatory=$true)][string]$Id,
+    [string]$Version # opcional; winget puede resolver la última disponible si no se especifica
+  )
+  if ($DryRun) {
+    Write-Host "[DRYRUN] winget upgrade --id $Id $(if($Version){"--version $Version"}) --accept-source-agreements --accept-package-agreements" -ForegroundColor Yellow
+    return
+  }
+  $args = @("upgrade","--id",$Id,"--accept-source-agreements","--accept-package-agreements")
+  if ($Version) { $args += @("--version",$Version) }
+  # 'upgrade' instalará si no está presente en muchas definiciones del repositorio
+  winget @args
+}
+
+function Install-HostingBundle {
+  param(
+    [Parameter(Mandatory=$true)][string]$Major # "8" o "9"
+  )
+  # Ids más comunes en winget (varían por feed). Probamos varias opciones.
+  $candidates = @(
+    "Microsoft.DotNet.HostingBundle.$Major",
+    "Microsoft.DotNet.AspNetCoreRuntime.$Major", # Incluye hosting para IIS en la mayoría de builds modernas
+    "Microsoft.AspNetCore.$Major" # fallback
+  )
+  foreach($id in $candidates){
+    try {
+      Write-Host "Intentando actualizar/instalar: $id" -ForegroundColor DarkCyan
+      Install-Or-Upgrade-WithWinget -Id $id
+      return
+    } catch {
+      Write-Host "Fallo con $id: $($_.Exception.Message)" -ForegroundColor DarkYellow
+    }
+  }
+  Write-Warning "No se pudo instalar el Hosting Bundle $Major.x con winget. Si tienes el instalador offline, ejecútalo manualmente."
+}
+
+function Install-Runtime {
+  param(
+    [Parameter(Mandatory=$true)][ValidateSet("NETCore","AspNetCore")]$Flavor,
+    [Parameter(Mandatory=$true)][string]$Version
+  )
+  # Mapea a IDs típicos de winget para runtime
+  $major = $Version.Split('.')[0]
+  $id = if ($Flavor -eq "NETCore") {
+    "Microsoft.DotNet.Runtime.$major"
+  } else {
+    "Microsoft.DotNet.AspNetCoreRuntime.$major"
+  }
+  Write-Host "Actualizando/instalando $Flavor $Version ($id)..." -ForegroundColor DarkCyan
+  try {
+    Install-Or-Upgrade-WithWinget -Id $id
+  } catch {
+    Write-Warning "No se pudo instalar $Flavor $Version con winget. Si tienes instalador MSI/EXE offline, ejecútalo."
+  }
+}
+
+function Try-Uninstall-Old {
+  param(
+    [string[]]$NetCoreVersions,
+    [string[]]$AspNetVersions
+  )
+  # Requiere la herramienta dotnet-core-uninstall (si no está, intentamos instalarla)
+  $toolCmd = "dotnet-core-uninstall"
+  if (-not (Test-Command $toolCmd)) {
+    Write-Host "Instalando .NET Uninstall Tool (si está disponible en winget)..." -ForegroundColor DarkCyan
+    try {
+      Install-Or-Upgrade-WithWinget -Id "Microsoft.DotNet.UninstallTool"
+    } catch {
+      Write-Warning "No se pudo instalar la Uninstall Tool con winget. Si ya la tienes como MSI instalada, se usará. Si no, se omite la desinstalación."
+    }
+  }
+
+  if (-not (Test-Command $toolCmd)) {
+    Write-Warning "No se encontró 'dotnet-core-uninstall'. Omitiendo desinstalación de versiones previas."
+    return
+  }
+
+  Write-Host "Listando instalaciones..." -ForegroundColor DarkCyan
+  if ($DryRun) {
+    Write-Host "[DRYRUN] dotnet-core-uninstall list" -ForegroundColor Yellow
+  } else {
+    & $toolCmd list
+  }
+
+  foreach($v in $NetCoreVersions){
+    $cmd = "$toolCmd remove --runtime --version $v"
+    if ($DryRun) { Write-Host "[DRYRUN] $cmd" -ForegroundColor Yellow } else { & $toolCmd remove --runtime --version $v }
+  }
+  foreach($v in $AspNetVersions){
+    $cmd = "$toolCmd remove --aspnet-runtime --version $v"
+    if ($DryRun) { Write-Host "[DRYRUN] $cmd" -ForegroundColor Yellow } else { & $toolCmd remove --aspnet-runtime --version $v }
+  }
+}
+
+function Restart-IISIfNeeded {
+  if ($SkipIISReset) { return }
+  if (Test-Command "iisreset") {
+    if ($DryRun) {
+      Write-Host "[DRYRUN] iisreset" -ForegroundColor Yellow
+    } else {
+      Write-Host "Reiniciando IIS..." -ForegroundColor DarkCyan
+      iisreset | Out-Host
+    }
+  }
+}
+
+try {
+  Assert-Admin
+  Write-Header "Detección de runtimes instalados"
+  $installed = Get-InstalledRuntimes
+  if ($installed.Count -eq 0) {
+    Write-Host "No se detectó 'dotnet' o no hay runtimes listados. Continuaré con instalación." -ForegroundColor Yellow
+  } else {
+    $installed | Sort-Object Flavor, Version | Format-Table Name,Version,Flavor,Path -AutoSize
+  }
+
+  Write-Header "Actualización de ASP.NET Core Hosting Bundles (8 y 9 si aplica)"
+  Ensure-Winget
+  Install-HostingBundle -Major "8"
+  Install-HostingBundle -Major "9"
+
+  Write-Header "Asegurar versiones objetivo (runtimes compartidos)"
+  foreach($v in $TargetNetCore) { Install-Runtime -Flavor NETCore    -Version $v }
+  foreach($v in $TargetAspNet)  { Install-Runtime -Flavor AspNetCore -Version $v }
+
+  Write-Header "Validación post-instalación"
+  if (Test-Command "dotnet") {
+    if ($DryRun) {
+      Write-Host "[DRYRUN] dotnet --list-runtimes" -ForegroundColor Yellow
+      Write-Host "[DRYRUN] dotnet --info" -ForegroundColor Yellow
+    } else {
+      dotnet --list-runtimes | Out-Host
+      dotnet --info | Out-Host
+    }
+  } else {
+    Write-Warning "No se encontró 'dotnet' en PATH tras la instalación. Revisa si se requiere reinicio de sesión/servidor."
+  }
+
+  if ($RemoveOld) {
+    Write-Header "Desinstalación de versiones previas (8.0.19 / 9.0.8)"
+    Try-Uninstall-Old -NetCoreVersions $OldNetCore -AspNetVersions $OldAspNet
+
+    Write-Header "Validación tras desinstalación"
+    if (Test-Command "dotnet") {
+      if ($DryRun) {
+        Write-Host "[DRYRUN] dotnet --list-runtimes" -ForegroundColor Yellow
+      } else {
+        dotnet --list-runtimes | Out-Host
+      }
+    }
+  }
+
+  Write-Header "Reinicio de IIS (si corresponde)"
+  Restart-IISIfNeeded
+
+  Write-Header "Listo"
+  Write-Host "Remediación completada. Asegúrate de ver Microsoft.NETCore.App 8.0.20/9.0.9 y Microsoft.AspNetCore.App 8.0.20/9.0.9 en la salida." -ForegroundColor Green
+
+} catch {
+  Write-Error $_.Exception.Message
+  exit 1
+}
+
